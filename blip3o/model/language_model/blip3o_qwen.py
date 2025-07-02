@@ -1,11 +1,22 @@
-from typing import List, Optional, Tuple, Union, Dict
+# Qwen model is only used for text-to-image generation, 
+# There is no image editing function yet. So vision_tower() is not used
+
+# The whole generation flow works like this
+# 1. input prompts are tokenized and passed through embedding layer to get embedding
+# 2. 64 Query embeddings are generated and appended to the text embeddings
+# 3. All embeddings are passed through the causal self-attention layer, and we extract the aggregated Q embeddings
+# 4. The aggregated query embeddings are then passed in as condition for denoising to obtain denoised eva clip features
+# 5. denoised eva clip features are then again passed in as condition for denoising to obtained denoised vae latent features
+# 6. The denoised vae latents are then decoded back to image
+
+
+from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from PIL import Image
 import torch.nn.functional as F
 
 
-import transformers
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -261,6 +272,8 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
         hidden_states = outputs.hidden_states[-1][:,-N_QUERY:,:]
         img_hidden_states = hidden_states 
         output_img = self.sample_images(img_hidden_states, scheduler)
+        # although it is called output_img, this is actually the denoised
+        # EVA clip feature
         output_img = output_img.view(1, 1792, -1).permute(0,2,1).contiguous()
 
         return output_img
@@ -394,7 +407,7 @@ class blip3oQwenForCausalLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaForCau
         gen_pooling = self.get_gen_pooling()
         n_query = self.get_n_query()
         num_img, _, c = prompt.shape
-        if 'pool2d' in gen_pooling and has_text and not 'early' in gen_pooling:
+        if 'pool2d' in gen_pooling and has_text and 'early' not in gen_pooling:
             stride = int(gen_pooling.split('_')[1])
             sqrt_n = int(n_query**0.5)
             prompt = prompt.permute(0, 2, 1).reshape(num_img, -1, sqrt_n, sqrt_n)

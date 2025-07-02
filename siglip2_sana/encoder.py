@@ -1,18 +1,15 @@
 from typing import List
 
 import torch
-from torch import nn
-from transformers import PretrainedConfig, PreTrainedModel
-from transformers import (
-    SiglipVisionModel,
-    SiglipImageProcessor,
-    CLIPVisionModel,
-    CLIPVisionConfig,
-    CLIPImageProcessor,
-    AutoImageProcessor,
-    AutoModel,
-)
 import torch.nn.functional as F
+from torch import nn
+from transformers import (
+    CLIPVisionModel,
+    PretrainedConfig,
+    PreTrainedModel,
+    SiglipImageProcessor,
+    SiglipVisionModel,
+)
 
 
 class EncoderConfig(PretrainedConfig):
@@ -49,6 +46,8 @@ class Encoder(PreTrainedModel):
         if "siglip2" in config.encoder_id:
             self.processor = SiglipImageProcessor.from_pretrained(config.encoder_id)
             self.model = SiglipVisionModel.from_pretrained(config.encoder_id, attn_implementation="sdpa")
+            # Freeze final encoder layer, norm, and head since they're unused when not using pooler output.
+            # This avoids unnecessary computation, gradient tracking, and parameter updates.
             if not self.pooler_output:
                 self.model.vision_model.encoder.layers[-1].requires_grad_(False)
                 self.model.vision_model.post_layernorm.requires_grad_(False)
@@ -75,11 +74,17 @@ class Encoder(PreTrainedModel):
             original_last_hidden_state = output.hidden_states[-2] if output is not None else None
             if self.as_latents:
                 # down sample the last hidden state's channels 1152 to 4 using average pooling
+                # [B, N, D] --> [B, N, 16]
                 last_hidden_state = F.adaptive_avg_pool1d(original_last_hidden_state, 16)
+                # [B, N, 16] --> [B, SQRT(N), SQRT(N), 16]
                 size = int(last_hidden_state.size(1) ** 0.5)
                 last_hidden_state = last_hidden_state.view(-1, size, size, last_hidden_state.size(-1))
+                # [B, SQRT(N), SQRT(N), 16] --> [B, 16, SQRT(N), SQRT(N)]
                 last_hidden_state = last_hidden_state.permute(0, 3, 1, 2)
-                last_hidden_state = F.interpolate(last_hidden_state, (self.input_size, self.input_size), mode="bilinear", align_corners=False)
+                # [B, 16, SQRT(N), SQRT(N)] --> [B, 16, input_size, input_size]
+                last_hidden_state = F.interpolate(
+                    last_hidden_state, (self.input_size, self.input_size), mode="bilinear", align_corners=False
+                )
 
             elif num_pooled_tokens > 0 and original_last_hidden_state is not None:
                 last_hidden_state = original_last_hidden_state
@@ -90,14 +95,17 @@ class Encoder(PreTrainedModel):
                     cls_token = None
                 last_hidden_state = last_hidden_state.view(-1, size, size, last_hidden_state.size(-1))
                 last_hidden_state = (
-                    nn.functional.adaptive_avg_pool2d(last_hidden_state.permute(0, 3, 1, 2), int(num_pooled_tokens**0.5))
+                    nn.functional.adaptive_avg_pool2d(
+                        last_hidden_state.permute(0, 3, 1, 2), int(num_pooled_tokens**0.5)
+                    )
                     .permute(0, 2, 3, 1)
                     .view(last_hidden_state.size(0), -1, last_hidden_state.size(-1))
                 )
-                last_hidden_state = torch.cat([cls_token, last_hidden_state], dim=1) if cls_token is not None else last_hidden_state
+                last_hidden_state = (
+                    torch.cat([cls_token, last_hidden_state], dim=1) if cls_token is not None else last_hidden_state
+                )
 
             else:
                 last_hidden_state = original_last_hidden_state
 
             return last_hidden_state
-

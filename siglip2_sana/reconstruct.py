@@ -1,28 +1,24 @@
-from copy import deepcopy
-from typing import Optional, Union, List
+from typing import List, Optional, Union
+
 import numpy as np
-import torch
-import torch.nn.functional as F
-from diffusers.models import AutoencoderKL, AutoencoderDC
-from diffusers.pipelines.pipeline_utils import numpy_to_pil
-from diffusers.schedulers import DDPMScheduler, DDIMScheduler, LCMScheduler, FlowMatchEulerDiscreteScheduler, DPMSolverMultistepScheduler
-from diffusers.utils.torch_utils import randn_tensor
-from torchvision.transforms import InterpolationMode, v2
-from transformers import AutoModelForDepthEstimation
-from transformers import PreTrainedModel, SiglipImageProcessor, CLIPImageProcessor, AutoImageProcessor
 import PIL
-from encoder import EncoderConfig, Encoder
-from sana import SanaConfig, Sana
+import torch
+from diffusers.models import AutoencoderDC
+from diffusers.pipelines.pipeline_utils import numpy_to_pil
+from diffusers.schedulers import DPMSolverMultistepScheduler, FlowMatchEulerDiscreteScheduler
+from diffusers.utils.torch_utils import randn_tensor
+from encoder import Encoder, EncoderConfig
+from sana import Sana, SanaConfig
 from torchvision.transforms import v2
-from trainer_utils import ProcessorWrapper
 from tqdm import tqdm
+from trainer_utils import ProcessorWrapper
+from transformers import PreTrainedModel, SiglipImageProcessor
 
 
 class ReconstructConfig(
     EncoderConfig,
     SanaConfig,
 ):
-
     def __init__(
         self,
         encoder_id: str = "google/siglip2-so400m-patch16-512",
@@ -34,9 +30,7 @@ class ReconstructConfig(
         num_pooled_tokens: int = -1,
         **kwargs,
     ):
-
         SanaConfig.__init__(self, **kwargs)
-
 
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -49,7 +43,6 @@ class ReconstructConfig(
         self.num_pooled_tokens = num_pooled_tokens
 
 
-
 class Reconstruct(PreTrainedModel):
     config_class = ReconstructConfig
 
@@ -57,7 +50,6 @@ class Reconstruct(PreTrainedModel):
         super().__init__(config, *args, **kwargs)
         self.config = config
 
-  
         self.encoder = Encoder(EncoderConfig(**config.to_dict()))
         config.latent_embedding_size = self.encoder.model.config.hidden_size
         self.processor = SiglipImageProcessor.from_pretrained(config.encoder_id)
@@ -71,17 +63,15 @@ class Reconstruct(PreTrainedModel):
             ]
         )
 
-
-
         self.transformer = Sana(SanaConfig(**config.to_dict()))
         self.vae = AutoencoderDC.from_pretrained(config.vae_id, subfolder="vae")
-        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.noise_scheduler_id, subfolder="scheduler")
+        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            config.noise_scheduler_id, subfolder="scheduler"
+        )
         self.scheduler = DPMSolverMultistepScheduler.from_pretrained(config.scheduler_id, subfolder="scheduler")
-
 
     def get_source_transform(self):
         return self.source_transform
-
 
     @torch.no_grad()
     def decode_latents(self, latents, normalize=True, return_tensor=False):
@@ -119,7 +109,10 @@ class Reconstruct(PreTrainedModel):
         source_transform = self.get_source_transform()
 
         bsz = len(x_source)
-        x_source_null = [source_transform(PIL.Image.new("RGB", (img.shape[1], img.shape[2]))).to(device=device, dtype=dtype) for img in x_source]
+        x_source_null = [
+            source_transform(PIL.Image.new("RGB", (img.shape[1], img.shape[2]))).to(device=device, dtype=dtype)
+            for img in x_source
+        ]
         x_source = torch.stack(x_source_null + x_source, dim=0)
 
         latent_size = self.config.input_size
@@ -132,7 +125,6 @@ class Reconstruct(PreTrainedModel):
             dtype=torch.float32,
         )
 
-
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
             sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
             self.scheduler.set_timesteps(num_inference_steps, sigmas=sigmas)
@@ -141,7 +133,7 @@ class Reconstruct(PreTrainedModel):
 
         z_latents_input = self.encoder(x_source, num_pooled_tokens=self.config.num_pooled_tokens)
 
-        if not pred_latent is None:
+        if pred_latent is not None:
             z_latents_input[1] = pred_latent
         for t in tqdm(self.scheduler.timesteps, desc="Sampling images", disable=not enable_progress_bar):
             latent_model_input = torch.cat([latents] * 2)
@@ -166,7 +158,7 @@ class Reconstruct(PreTrainedModel):
             # compute previous image: x_t -> x_t-1
             latents = self.scheduler.step(noise_pred, t, latents).prev_sample
 
-        samples = self.decode_latents(latents.to(self.vae.dtype) if self.vae is not None else latents, return_tensor=return_tensor)
+        samples = self.decode_latents(
+            latents.to(self.vae.dtype) if self.vae is not None else latents, return_tensor=return_tensor
+        )
         return samples
-
-

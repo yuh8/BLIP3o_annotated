@@ -14,40 +14,55 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 
 def build_vision_tower(vision_tower_cfg, **kwargs):
-    vision_tower = getattr(vision_tower_cfg, 'mm_vision_tower', getattr(vision_tower_cfg, 'vision_tower', None))
+    vision_tower = getattr(
+        vision_tower_cfg,
+        "mm_vision_tower",
+        getattr(vision_tower_cfg, "vision_tower", None),
+    )
     is_absolute_path_exists = os.path.exists(vision_tower)
-    use_s2 = getattr(vision_tower_cfg, 's2', False)
+    use_s2 = getattr(vision_tower_cfg, "s2", False)
     if "siglip" in vision_tower:
-        return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+        return SigLipVisionTower(
+            vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs
+        )
     if "eva" in vision_tower:
         return EvaClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
-    if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
+    if (
+        is_absolute_path_exists
+        or vision_tower.startswith("openai")
+        or vision_tower.startswith("laion")
+        or "ShareGPT4V" in vision_tower
+    ):
         if use_s2:
             return CLIPVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
         else:
             return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
-    raise ValueError(f'Unknown vision tower: {vision_tower}')
-
-
+    raise ValueError(f"Unknown vision tower: {vision_tower}")
 
 
 def build_gen_vision_tower(vision_tower_cfg, **kwargs):
-    vision_tower = getattr(vision_tower_cfg, 'gen_vision_tower')
+    vision_tower = getattr(vision_tower_cfg, "gen_vision_tower")
     is_absolute_path_exists = os.path.exists(vision_tower)
-    use_s2 = getattr(vision_tower_cfg, 's2', False)
+    use_s2 = getattr(vision_tower_cfg, "s2", False)
     if "siglip" in vision_tower:
-        return SigLipVisionTower(vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs)
+        return SigLipVisionTower(
+            vision_tower, vision_tower_cfg=vision_tower_cfg, **kwargs
+        )
     if "eva" in vision_tower:
         return EvaClipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
-    if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion") or "ShareGPT4V" in vision_tower:
+    if (
+        is_absolute_path_exists
+        or vision_tower.startswith("openai")
+        or vision_tower.startswith("laion")
+        or "ShareGPT4V" in vision_tower
+    ):
         if use_s2:
             return CLIPVisionTowerS2(vision_tower, args=vision_tower_cfg, **kwargs)
         else:
             return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
 
-    raise ValueError(f'Unknown vision tower: {vision_tower}')
-
+    raise ValueError(f"Unknown vision tower: {vision_tower}")
 
 
 def build_dit(vision_tower_cfg, **kwargs):
@@ -57,8 +72,10 @@ def build_dit(vision_tower_cfg, **kwargs):
         elif "7B" in vision_tower_cfg.model_name_or_path:
             vision_tower_cfg.hidden_size = 3584
 
-    dit = NextDiTCrossAttn(NextDiTCrossAttnConfig(latent_embedding_size=vision_tower_cfg.hidden_size))
-    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained("Alpha-VLLM/Lumina-Next-SFT-diffusers", subfolder="scheduler")
+    dit = NextDiTCrossAttn(
+        NextDiTCrossAttnConfig(latent_embedding_size=vision_tower_cfg.hidden_size)
+    )
+    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        "Alpha-VLLM/Lumina-Next-SFT-diffusers", subfolder="scheduler"
+    )
     return dit, noise_scheduler
-
-

@@ -1,12 +1,9 @@
-from typing import List, Optional, Tuple, Union, Dict
+from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 from PIL import Image
 import torch.nn.functional as F
-import transformers
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.generation.utils import GenerateOutput
 from blip3o.model.blip3o_arch import blip3oMetaModel, blip3oMetaForCausalLM
 from transformers import Qwen2_5_VLConfig, Qwen2_5_VLModel, Qwen2_5_VLForConditionalGeneration
 from blip3o.constants import UND_IMAGE_TOKEN_IDX
@@ -225,7 +222,7 @@ class blip3oQwenForInferenceLM(Qwen2_5_VLForConditionalGeneration, blip3oMetaFor
         gen_pooling = self.get_gen_pooling()
         n_query = self.get_n_query()
         num_img, _, c = prompt.shape
-        if 'pool2d' in gen_pooling and has_text and not 'early' in gen_pooling:
+        if 'pool2d' in gen_pooling and has_text and 'early' not in gen_pooling:
             stride = int(gen_pooling.split('_')[1])
             sqrt_n = int(n_query**0.5)
             prompt = prompt.permute(0, 2, 1).reshape(num_img, -1, sqrt_n, sqrt_n)

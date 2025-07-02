@@ -1,31 +1,83 @@
 from typing import List, Optional, Tuple, Union
-from PIL import Image
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from transformers import AutoConfig, AutoModelForCausalLM, \
-                         LlamaConfig, LlamaModel, LlamaForCausalLM, AutoTokenizer
-
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.generation.utils import GenerateOutput
-
-from ..blip3o_arch import blip3oMetaModel, blip3oMetaForCausalLM
-from blip3o.constants import IGNORE_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IMAGE_TOKEN_IDX, DEFAULT_IM_START_TOKEN_IDX, DEFAULT_IM_END_TOKEN_IDX
-import pdb
-from diffusers.utils.torch_utils import randn_tensor
-from diffusers.pipelines.pipeline_utils import numpy_to_pil
-import numpy as np
 from diffusers.models import AutoencoderKL
+from diffusers.pipelines.pipeline_utils import numpy_to_pil
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
+from diffusers.utils.torch_utils import randn_tensor
+from PIL import Image
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaModel,
+)
+from transformers.generation.utils import GenerateOutput
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
+from blip3o.constants import (
+    DEFAULT_IMAGE_TOKEN,
+)
+
+from ..blip3o_arch import blip3oMetaForCausalLM, blip3oMetaModel
 
 
 class blip3oConfig(LlamaConfig):
+    """
+    Configuration class for the BLIP-3o LLaMA model.
+
+    This class extends the standard LlamaConfig to register a custom model type
+    identifier (`"blip3o_llama"`) used for multimodal BLIP-3o models. It enables
+    the integration of additional vision-language components and sampling logic
+    into the Hugging Face model loading ecosystem.
+
+    Setting `model_type = "blip3o_llama"` allows Hugging Face's `AutoConfig` and
+    `AutoModelForCausalLM` classes to correctly resolve this configuration to the
+    corresponding custom model class (`blip3oLlamaForCausalLM`), rather than the
+    base LLaMA implementation.
+    """
+
     model_type = "blip3o_llama"
 
 
 class blip3oLlamaModel(blip3oMetaModel, LlamaModel):
+    """
+    Backbone model for the BLIP-3o architecture, combining LLaMA and vision-language fusion.
+
+    This class inherits from both `blip3oMetaModel` and Hugging Face's `LlamaModel`, forming
+    the core transformer component of the BLIP-3o model. It integrates BLIP-3o's multimodal
+    capabilities—such as visual feature injection, latent queries, and projection modules—
+    with the standard LLaMA transformer layers.
+
+    The `config_class` is set to `blip3oConfig`, allowing Hugging Face's `AutoModel` and
+    `AutoConfig` APIs to correctly map the configuration to this model implementation.
+
+    In practice, this class is used as the base model inside `blip3oLlamaForCausalLM`, which
+    adds language modeling heads and generation methods on top.
+
+    ---
+    🧠 Relationship to CausalLM Variant:
+
+    This class does not include any language modeling (LM) prediction head. It outputs only the
+    hidden states of the transformer. It is typically used as a backbone inside
+    `blip3oLlamaForCausalLM`, which adds a linear "LM head" that maps hidden states to logits
+    over the vocabulary and enables token prediction.
+
+    The LM head in the causal model is typically defined as:
+        `self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)`
+
+    This layer enables next-token prediction during training and autoregressive generation.
+
+
+    Args:
+        config (LlamaConfig): Configuration object defining model hyperparameters.
+    """
+
     config_class = blip3oConfig
 
     def __init__(self, config: LlamaConfig):
@@ -67,15 +119,14 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
         und_image: Optional[torch.FloatTensor] = None,
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
+
         if inputs_embeds is None:
             (
                 input_ids,
@@ -84,7 +135,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
                 past_key_values,
                 inputs_embeds,
                 labels,
-                latents
+                latents,
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -94,7 +145,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
                 gen_image,
                 und_image,
                 i_s_pos,
-                image_sizes
+                image_sizes,
             )
 
         outputs = self.model(
@@ -108,11 +159,11 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        
+
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
-        
+
         total_loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -126,30 +177,50 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
-
             # compute image loss
             # target_img_embeds = torch.clone(inputs_embeds.detach())[:,1:,:] # get target image emb
             img_loss_funct = torch.nn.MSELoss()
             # img_hidden_states = self.get_model().down_projector(hidden_states[:,-self.get_n_query():,:])
             img_hidden_states = []
-            
+
+            # for each input sample, extract 64 image tokens from image start pos
             for b in range(hidden_states.shape[0]):
-                img_hidden_states.append(hidden_states[b,i_s_pos[b]:i_s_pos[b]+64,:])
-            img_hidden_states = torch.stack(img_hidden_states,dim=0)
+                img_hidden_states.append(hidden_states[b, i_s_pos[b] : i_s_pos[b] + 64, :])
+            img_hidden_states = torch.stack(img_hidden_states, dim=0)
             img_hidden_states = self.get_model().down_projector(img_hidden_states)
             # img_loss = 0.0
             if latents is None:
+                # Placeholder loss (zero) when latents are unavailable; preserves tensor type and device
                 img_loss = img_loss_funct(img_hidden_states, torch.clone(img_hidden_states.detach()))
             else:
                 bsz = latents.shape[0]
                 # device = latents.device
                 dtype = latents.dtype
                 noise = torch.randn_like(latents, device=latents.device)
+
+                # Sample a batch of random timesteps for learning to denoise at varying noise levels
                 u = torch.rand(size=(bsz,), device="cpu")
+                # Random uniform to train step indices [0.1, 0.2, 0.05, 0.3] * 1000.long() --> [100 200 50, 300]
                 indices = (u * self.get_model().noise_scheduler.config.num_train_timesteps).long()
                 timesteps = self.get_model().noise_scheduler.timesteps[indices].to(device=latents.device)
+
+                # linear interpolation flow matching. Sigmas for a linear schedule
                 sigmas = self.get_sigmas(timesteps, latents.device, n_dim=latents.ndim, dtype=dtype)
                 noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+                # Apply Classifier-Free Guidance (CFG) regularization during training.
+                #
+                # The variable `z_latents` contains the conditioning vectors for the diffusion model — one per sample
+                # in the batch — derived from the image tokens produced by the transformer and projected via `down_projector`.
+                # These vectors encode the semantic conditioning (e.g., from text or multimodal input) that guides image generation.
+                #
+                # To enable classifier-free guidance, we apply dropout at the **batch level** using `mask_drop`.
+                # For each sample in the batch, we randomly decide (with probability `drop_prob`) whether to keep or drop
+                # its `z_latents`. Dropped samples have their conditioning vectors replaced with zeros.
+                #
+                # This trains the diffusion model (DiT) to perform both conditional and unconditional denoising,
+                # enabling guidance-based image generation during inference by combining the two modes.
+                #
+                # This strategy follows the standard CFG approach used in models like Stable Diffusion and GLIDE.
                 noise_pred = self.get_model().dit(
                     x=noisy_latents,
                     timestep=timesteps,
@@ -167,7 +238,6 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-        
 
     @torch.no_grad()
     def generate(
@@ -177,6 +247,33 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
         image_sizes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
+        """
+        Generate text from input tokens and optionally associated images.
+
+        This method extends the base LLaMA generation functionality to support
+        multimodal inputs. If `images` are provided, the model first processes
+        them through the vision tower and projector to obtain image-conditioned
+        token embeddings. These embeddings are then concatenated with token
+        embeddings from `inputs` to form `inputs_embeds`, which are passed to
+        the base language model generation method.
+
+        If no images are provided, the method defaults to standard text-only generation.
+
+        Args:
+            inputs (Optional[torch.Tensor]):
+                Input token IDs of shape (batch_size, sequence_length).
+            images (Optional[torch.Tensor]):
+                Image tensor(s) of shape (batch_size, C, H, W) to condition the generation.
+            image_sizes (Optional[torch.Tensor]):
+                Optional image size metadata used for positional embedding or cropping alignment.
+            **kwargs:
+                Additional keyword arguments passed to the underlying `generate` method from
+                `LlamaForCausalLM`, such as `max_length`, `temperature`, `do_sample`, etc.
+
+        Returns:
+            Union[GenerateOutput, torch.LongTensor]:
+                The generated token IDs, or a full GenerateOutput object depending on the generation config.
+        """
         position_ids = kwargs.pop("position_ids", None)
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
@@ -190,7 +287,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
                 _,
                 inputs_embeds,
                 img_indicator,
-                _
+                _,
             ) = self.prepare_inputs_labels_for_understanding(
                 inputs,
                 position_ids,
@@ -198,7 +295,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
                 None,
                 None,
                 images,
-                image_sizes=image_sizes
+                image_sizes=image_sizes,
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
@@ -207,7 +304,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
-            **kwargs
+            **kwargs,
         )
 
     @torch.no_grad()
@@ -218,8 +315,10 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
         image: Optional[torch.Tensor] = None,
         max_var: Optional[float] = None,
         # placeholder: str = DEFAULT_IMG_PLACEHOLDER,
-    ):  
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained("Alpha-VLLM/Lumina-Next-SFT-diffusers", subfolder="scheduler")
+    ):
+        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            "Alpha-VLLM/Lumina-Next-SFT-diffusers", subfolder="scheduler"
+        )
 
         vision_tower = self.get_vision_tower()
         mm_projector = self.get_mm_projector()
@@ -232,7 +331,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             all_image_embeds = torch.clone(prompt_image_embeds).detach()
             prompt_image_embeds = prompt_image_embeds.contiguous().view(-1, c)
             prompt_image_embeds = mm_projector(prompt_image_embeds)
-            
+
         inputs = tokenizer(text, padding="longest", return_tensors="pt")
         device = self.get_model().device
         attention_mask = inputs.attention_mask.to(device)
@@ -253,10 +352,10 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             output_hidden_states=True,
             return_dict=True,
         )
-        hidden_states = outputs.hidden_states[-1][:,-N_QUERY:,:]
+        hidden_states = outputs.hidden_states[-1][:, -N_QUERY:, :]
         img_hidden_states = self.get_model().down_projector(hidden_states)
         output_img = self.sample_images(img_hidden_states, scheduler)
-        output_img = output_img.view(1, 1792, -1).permute(0,2,1).contiguous()
+        output_img = output_img.view(1, 1792, -1).permute(0, 2, 1).contiguous()
 
         return output_img
 
@@ -271,7 +370,6 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
         return_tensor=False,
         **kwargs,
     ):
-        
         device = img_hidden_states.device
         dtype = img_hidden_states.dtype
 
@@ -283,7 +381,12 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
         latent_channels = self.get_model().dit.config.in_channels
 
         latents = randn_tensor(
-            shape=(batch_size * num_images_per_prompt, latent_channels, latent_size, latent_size),
+            shape=(
+                batch_size * num_images_per_prompt,
+                latent_channels,
+                latent_size,
+                latent_size,
+            ),
             generator=generator,
             device=device,
             dtype=dtype,
@@ -359,7 +462,7 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
             else:
                 has_image = True
                 text_prompt += DEFAULT_IMAGE_TOKEN
-                image_prompt.append(img_processor.preprocess(x, return_tensors='pt')['pixel_values'])
+                image_prompt.append(img_processor.preprocess(x, return_tensors="pt")["pixel_values"])
         # pdb.set_trace()
         if len(image_prompt) == 0:
             image_prompt = None
@@ -383,31 +486,33 @@ class blip3oLlamaForCausalLM(LlamaForCausalLM, blip3oMetaForCausalLM):
                 if key not in negative_prompt:
                     negative_prompt[key] = self.generate_image(text=[""], tokenizer=tokenizer)
                 prompt = torch.cat([prompt, negative_prompt[key]], dim=0)
-        
+
         gen_pooling = self.get_gen_pooling()
         n_query = self.get_n_query()
         num_img, _, c = prompt.shape
-        if 'pool2d' in gen_pooling and has_text and not 'early' in gen_pooling:
-            stride = int(gen_pooling.split('_')[1])
+        if "pool2d" in gen_pooling and has_text and "early" not in gen_pooling:
+            stride = int(gen_pooling.split("_")[1])
             sqrt_n = int(n_query**0.5)
             prompt = prompt.permute(0, 2, 1).reshape(num_img, -1, sqrt_n, sqrt_n)
             prompt = F.avg_pool2d(prompt, kernel_size=(stride, stride), stride=stride)
-            prompt = prompt.reshape(num_img, c, -1).permute(0,2,1)
+            prompt = prompt.reshape(num_img, c, -1).permute(0, 2, 1)
         return prompt
 
-
-    def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
-                                      inputs_embeds=None, **kwargs):
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
         inputs = super().prepare_inputs_for_generation(
-            input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
+            input_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
         )
         if images is not None:
-            inputs['images'] = images
+            inputs["images"] = images
         if image_sizes is not None:
-            inputs['image_sizes'] = image_sizes
+            inputs["image_sizes"] = image_sizes
         return inputs
+
 
 AutoConfig.register("blip3o_llama", blip3oConfig)
 AutoModelForCausalLM.register(blip3oConfig, blip3oLlamaForCausalLM)

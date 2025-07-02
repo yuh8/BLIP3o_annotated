@@ -1,11 +1,15 @@
-from typing import Optional, Tuple, Union, Dict
+import os
 from dataclasses import dataclass
 from functools import partial, reduce
-from PIL import Image
+from typing import Dict, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.utils.checkpoint
+from PIL import Image
 from torch import nn
-import os
+from transformers import PretrainedConfig
+from transformers.activations import ACT2FN
 from transformers.image_processing_utils import BatchFeature, get_size_dict
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -19,12 +23,9 @@ from transformers.image_utils import (
     PILImageResampling,
     to_numpy_array,
 )
-from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
-from transformers import PretrainedConfig
 from transformers.utils import ModelOutput
-import numpy as np
 
 
 class SigLipImageProcessor:
@@ -76,13 +77,9 @@ class SigLipImageProcessor:
         rescale_factor=1 / 255,  # rescale image between [0, 1]
         data_format=ChannelDimension.FIRST,
     ):
-        crop_size = (
-            crop_size if crop_size is not None else {"height": 384, "width": 384}
-        )
+        crop_size = crop_size if crop_size is not None else {"height": 384, "width": 384}
         # get_size_dict(384, default_to_square=True) ➜ dictionary {"height": 384, "width": 384}
-        crop_size = get_size_dict(
-            crop_size, default_to_square=True, param_name="crop_size"
-        )
+        crop_size = get_size_dict(crop_size, default_to_square=True, param_name="crop_size")
 
         self.image_mean = image_mean
         self.image_std = image_std
@@ -110,9 +107,7 @@ class SigLipImageProcessor:
                     resample=self.resample,
                     data_format=self.data_format,
                 ),
-                partial(
-                    rescale, scale=self.rescale_factor, data_format=self.data_format
-                ),
+                partial(rescale, scale=self.rescale_factor, data_format=self.data_format),
                 partial(
                     normalize,
                     mean=self.image_mean,
@@ -136,7 +131,8 @@ class SigLipImageProcessor:
             # [img1_normalized, img2_normalized, img3_normalized]
             images = reduce(lambda x, f: [*map(f, x)], transforms, images)
             data = {"pixel_values": images}
-        except ValueError as e:
+        except ValueError:
+            # processing gray-scaled images
             try:
                 transforms = [
                     convert_to_rgb,
@@ -147,9 +143,7 @@ class SigLipImageProcessor:
                         resample=self.resample,
                         data_format=self.data_format,
                     ),
-                    partial(
-                        rescale, scale=self.rescale_factor, data_format=self.data_format
-                    ),
+                    partial(rescale, scale=self.rescale_factor, data_format=self.data_format),
                     partial(
                         normalize,
                         mean=self.image_mean[0],
@@ -225,9 +219,7 @@ class SigLipVisionConfig(PretrainedConfig):
         self.image_mean = image_mean
 
     @classmethod  # classmethod as an alternative constructor
-    def from_pretrained(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
-    ) -> "PretrainedConfig":
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
         """
         Load a configuration from a pretrained model or directory.
 
@@ -257,21 +249,16 @@ class SigLipVisionConfig(PretrainedConfig):
             complex loading logic and supports extensibility, inheritance, and
             modular configuration management in a clean and reusable way.
         """
+        # for assigning HF hub authentication token
         cls._set_token_in_kwargs(kwargs)
 
-        config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
-        )
+        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
 
         # get the vision config dict if we are loading from SigLipConfig
         if config_dict.get("model_type") == "siglip":
             config_dict = config_dict["vision_config"]
 
-        if (
-            "model_type" in config_dict
-            and hasattr(cls, "model_type")
-            and config_dict["model_type"] != cls.model_type
-        ):
+        if "model_type" in config_dict and hasattr(cls, "model_type") and config_dict["model_type"] != cls.model_type:
             print(
                 f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
                 f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
@@ -410,20 +397,12 @@ class SigLipAttention(nn.Module):
 
         # Prefer reshape over view — it handles non-contiguous tensors safely
         # by copying if needed, while view requires contiguous memory and may error.
-        query_states = query_states.view(
-            batch_size, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            batch_size, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            batch_size, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+        query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         k_v_seq_len = key_states.shape[-2]
-        attn_weights = (
-            torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
-        )
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale
 
         if attn_weights.size() != (batch_size, self.num_heads, q_len, k_v_seq_len):
             raise ValueError(
@@ -441,12 +420,8 @@ class SigLipAttention(nn.Module):
         # Upcast to float32 for numerically stable softmax, as bfloat16/float16
         # lack sufficient mantissa precision to safely compute exponentials;
         # then downcast back to match model dtype.
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.dropout, training=self.training
-        )
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (batch_size, self.num_heads, q_len, self.head_dim):
@@ -611,9 +586,7 @@ class SigLipEncoder(nn.Module):
     def __init__(self, config: SigLipVisionConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [SigLipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([SigLipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     # Ignore copy
@@ -647,19 +620,11 @@ class SigLipEncoder(nn.Module):
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -691,11 +656,8 @@ class SigLipEncoder(nn.Module):
             encoder_states = encoder_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(
-                v
-                for v in [hidden_states, encoder_states, all_attentions]
-                if v is not None
-            )
+            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
+        # return a standar dataclass
         return BaseModelOutput(
             last_hidden_state=hidden_states,
             hidden_states=encoder_states,
@@ -710,9 +672,7 @@ class SigLipMultiheadAttentionPoolingHead(nn.Module):
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
-        self.attention = torch.nn.MultiheadAttention(
-            config.hidden_size, config.num_attention_heads, batch_first=True
-        )
+        self.attention = torch.nn.MultiheadAttention(config.hidden_size, config.num_attention_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SigLipMLP(config)
 
@@ -729,9 +689,7 @@ class SigLipMultiheadAttentionPoolingHead(nn.Module):
         # Value   = hidden_state: [B, seq_len, H]
         # output: attention returns a tuple (attn_output, attn_weights)
         # attn_output: [B, 1, H]
-        hidden_state = self.attention(probe, hidden_state, hidden_state)[
-            0
-        ]  # → [B, 1, H]
+        hidden_state = self.attention(probe, hidden_state, hidden_state)[0]  # → [B, 1, H]
 
         # Save residual for skip connection
         residual = hidden_state  # [B, 1, H]
@@ -775,19 +733,11 @@ class SigLipVisionTransformer(nn.Module):
         Returns:
 
         """
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         hidden_states = self.embeddings(pixel_values)
 
@@ -859,9 +809,7 @@ class SigLipVisionModel(SigLipPreTrainedModel):
         >>> last_hidden_state = outputs.last_hidden_state
         >>> pooled_output = outputs.pooler_output  # pooled features
         ```"""
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         return self.vision_model(
             pixel_values=pixel_values,
@@ -892,10 +840,7 @@ class SigLipVisionTower(nn.Module):
             # TODO: better detector is needed.
             # rank0_print(f"The checkpoint seems to contain `vision_tower` weights: `unfreeze_mm_vision_tower`: True.")
             self.load_model()
-        elif (
-            hasattr(vision_tower_cfg, "mm_tunable_parts")
-            and "mm_vision_tower" in vision_tower_cfg.mm_tunable_parts
-        ):
+        elif hasattr(vision_tower_cfg, "mm_tunable_parts") and "mm_vision_tower" in vision_tower_cfg.mm_tunable_parts:
             # rank0_print(f"The checkpoint seems to contain `vision_tower` weights: `mm_tunable_parts` contains `mm_vision_tower`.")
             self.load_model()
         else:
@@ -907,9 +852,7 @@ class SigLipVisionTower(nn.Module):
             # rank0_print("{} is already loaded, `load_model` called again, skipping.".format(self.vision_tower_name))
             return
 
-        self.vision_tower = SigLipVisionModel.from_pretrained(
-            self.vision_tower_name, device_map=device_map
-        )
+        self.vision_tower = SigLipVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
 
         # del self.vision_tower.vision_model.encoder.layers[-1:]
         # removed attention pooling for connecting vision tokens to diffuser
